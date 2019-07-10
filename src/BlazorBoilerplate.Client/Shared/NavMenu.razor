@@ -7,9 +7,6 @@
             <MatListItem Href="@uriHelper.ToAbsoluteUri(" ").AbsoluteUri">
                 <MatIcon>home</MatIcon> <span>Home page</span>
             </MatListItem>
-            <MatListItem Href="@uriHelper.ToAbsoluteUri("counter").AbsoluteUri">
-                <MatIcon>exposure_plus_1</MatIcon> <span>Counter</span>
-            </MatListItem>
             <MatListItem Href="@uriHelper.ToAbsoluteUri("dashboard").AbsoluteUri" Disabled="@(!IsLoggedIn)">
                 <MatIcon>bar_chart</MatIcon> <span>Dashboard</span>
             </MatListItem>
@@ -19,6 +16,9 @@
             <MatListItem Href="@uriHelper.ToAbsoluteUri("email").AbsoluteUri" Disabled="@(!IsLoggedIn)">
                 <MatIcon>mail_outline</MatIcon> <span>Email</span>
             </MatListItem>
+            <MatListItem Href="@uriHelper.ToAbsoluteUri("admin/users").AbsoluteUri" Disabled="@(!IsLoggedIn)">
+                <MatIcon>supervisor_account</MatIcon> <span>Users</span>
+            </MatListItem>
             <MatListItem Href="@uriHelper.ToAbsoluteUri("contributors").AbsoluteUri">
                 <MatIcon>people</MatIcon> <span>Contributors</span>
             </MatListItem>
@@ -26,14 +26,26 @@
     </MatListGroup>
 </nav>
 
-@code {
-    [Parameter]
-    public BlazorAuthenticationState authState { get; set; }
+@functions {
+    public bool IsLoggedIn = false;
 
-    public bool IsLoggedIn;
+    [CascadingParameter]
+    Task<AuthenticationState> authenticationStateTask  { get; set; }
 
-    protected override async Task OnInitAsync()
+    protected override async Task OnParametersSetAsync()
     {
-        IsLoggedIn = await authState.IsLoggedIn();
+        IsLoggedIn = false;
+        var user = (await authenticationStateTask).User;
+
+        if (user.Identity.IsAuthenticated)
+        {
+            IsLoggedIn = true;
+        }  
+        
+        //https://gist.github.com/SteveSandersonMS/175a08dcdccb384a52ba760122cd2eda Examples
+        //if (user.IsInRole("Admin"))
+        //{
+            // Perform some action only available to users in the 'admin' role
+        //}
     }
 }

@@ -1,18 +1,18 @@
-﻿using BlazorBoilerplate.Server.Models;
-using BlazorBoilerplate.Shared;
+﻿using System;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Security.Claims;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using BlazorBoilerplate.Server.Helpers;
+using BlazorBoilerplate.Server.Services;
+using BlazorBoilerplate.Shared;
 
 namespace BlazorBoilerplate.Server.Models
-{ 
-    [Route("api/authorize")]
+{
+    [Route("api/Authorize")]
     [ApiController]
     public class AuthorizeController : ControllerBase
     {
@@ -24,15 +24,19 @@ namespace BlazorBoilerplate.Server.Models
         private readonly UserManager<ApplicationUser>    _userManager;
         private readonly SignInManager<ApplicationUser>  _signInManager;
         private readonly RoleManager<IdentityRole<Guid>> _roleManager;
+        private readonly IEmailService _emailService;
+        private IConfiguration _configuration;
 
         public AuthorizeController(UserManager<ApplicationUser> userManager,
             SignInManager<ApplicationUser> signInManager, ILogger<AuthorizeController> logger,
-            RoleManager<IdentityRole<Guid>> roleManager)
+            RoleManager<IdentityRole<Guid>> roleManager, IEmailService emailService, IConfiguration configuration)
         {
             _userManager   = userManager;
             _signInManager = signInManager;
             _logger        = logger;
             _roleManager   = roleManager;
+            _emailService = emailService;
+            _configuration = configuration;
         }
 
         [HttpGet("")]
@@ -43,7 +47,7 @@ namespace BlazorBoilerplate.Server.Models
                 : LoggedOutUser;
         }
 
-        [HttpPost("login")]
+        [HttpPost("Login")]
         [AllowAnonymous]
         [ProducesResponseType(204)]
         [ProducesResponseType(400)]
@@ -76,15 +80,13 @@ namespace BlazorBoilerplate.Server.Models
             // add custom claims here, before signin if needed
             var claims = await _userManager.GetClaimsAsync(user);
             //await _userManager.RemoveClaimsAsync(user, claims);
-            
 
             await _signInManager.SignInAsync(user, parameters.RememberMe);
-            return Ok(BuildUserInfo(user));
+            return Ok(new { success = "true" });
         }
 
-
         [AllowAnonymous]
-        [HttpPost("register")]
+        [HttpPost("Register")]
         public async Task<IActionResult> Register(RegisterParameters parameters)
         {
             try
@@ -95,7 +97,7 @@ namespace BlazorBoilerplate.Server.Models
                         .FirstOrDefault());
 
                 // https://gooroo.io/GoorooTHINK/Article/17333/Custom-user-roles-and-rolebased-authorization-in-ASPNET-core/32835
-                string[] roleNames = { "SuperAdmin","Admin","User" };
+                string[] roleNames = { "SuperAdmin", "Admin", "User" };
                 IdentityResult roleResult;
 
                 foreach (var roleName in roleNames)
@@ -111,23 +113,64 @@ namespace BlazorBoilerplate.Server.Models
                 var user = new ApplicationUser
                 {
                     UserName = parameters.UserName,
-                    Email = parameters.UserName
+                    Email = parameters.Email
                 };
 
                 user.UserName = parameters.UserName;
                 var result = await _userManager.CreateAsync(user, parameters.Password);
                 if (!result.Succeeded) return BadRequest(result.Errors.FirstOrDefault()?.Description);
-                           
-                //Role - Here we tie the new user to the "Admin" role 
+
+                //Role - Here we tie the new user to the "Admin" role
                 await _userManager.AddToRoleAsync(user, "Admin");
 
-                _logger.LogInformation("New user registered: {0}", user);
+                if (Convert.ToBoolean(_configuration["RequireConfirmedEmail"]))
+                {
+                    #region New  User Confirmation Email
+                    try
+                    {
+                        // For more information on how to enable account confirmation and password reset please visit http://go.microsoft.com/fwlink/?LinkID=532713
+                        var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
+                        string callbackUrl = string.Format("{0}/Account/ConfirmEmail/{1}?token={2}", _configuration["ApplicationUrl"], user.Id, token); 
+
+                        var email = new EmailMessage();
+                        email.ToAddresses.Add(new EmailAddress(user.Email, user.Email));
+                        email.FromAddresses.Add(new EmailAddress("support@blazorboilerplate.com", "support@blazorboilerplate.com"));
+                        email = EmailTemplates.BuildNewUserConfirmationEmail(email, user.UserName, user.Email, callbackUrl, user.Id.ToString(), token); //Replace First UserName with Name if you want to add name to Registration Form
+
+                        _logger.LogInformation("New user registered: {0}", user);
+                        await _emailService.SendEmailAsync(email);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogInformation("New user email failed: {0}", ex.Message);
+                    }
+                    #endregion
+                    return Ok(new { success = "true" });
+                }
+
+                #region New  User Email
+                try
+                {
+                    var email = new EmailMessage();
+                    email.ToAddresses.Add(new EmailAddress(user.Email, user.Email));
+                    email.FromAddresses.Add(new EmailAddress("support@blazorboilerplate.com", "support@blazorboilerplate.com"));
+                    email = EmailTemplates.BuildNewUserEmail(email, user.UserName, user.Email, parameters.Password); //Replace First UserName with Name if you want to add name to Registration Form
+
+                    _logger.LogInformation("New user registered: {0}", user);
+                    await _emailService.SendEmailAsync(email);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogInformation("New user email failed: {0}", ex.Message);
+                }
+                #endregion
 
                 return await Login(new LoginParameters
                 {
                     UserName = parameters.UserName,
                     Password = parameters.Password
                 });
+
             }
             catch (Exception  ex)
             {
@@ -137,40 +180,130 @@ namespace BlazorBoilerplate.Server.Models
         }
 
         [AllowAnonymous]
-        [HttpPost("SendPasswordResetEmail")]
-        public async Task<IActionResult> SendPasswordResetEmail(string emailAddress)
+        [HttpPost("ConfirmEmail")]
+        public async Task<IActionResult> ConfirmEmail(ConfirmEmailParameters parameters)
         {
-            var user = await _userManager.FindByEmailAsync(emailAddress);
-            if (user == null)
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState.Values.SelectMany(state => state.Errors)
+                    .Select(error => error.ErrorMessage)
+                    .FirstOrDefault());
+
+            if (parameters.UserId == null || parameters.Token == null)
             {
-                return Ok();
+                return BadRequest();
             }
 
-            return Ok();
+            var user = await _userManager.FindByIdAsync(parameters.UserId);
+            if (user == null)
+            {
+                _logger.LogInformation("User does not exist: {0}", parameters.UserId);
+                return BadRequest("User does not exist");
+            }
 
-            // Todo Complete Email Service / Email Templates / Password reset
+            string token = parameters.Token;
+            var result = await _userManager.ConfirmEmailAsync(user, token);
+            if (!result.Succeeded)
+            {
+                _logger.LogInformation("User Email Confirmation Failed: {0}", result.Errors.FirstOrDefault()?.Description);
+                return BadRequest(result.Errors.FirstOrDefault()?.Description);
+            }
 
-            //user.SetNewPasswordResetCode();
-            //var passwordResetCode = user.PasswordResetCode;
+            await _signInManager.SignInAsync(user, true);
+            return Ok(new { success = "true" });
+        }
+                
+        [AllowAnonymous]
+        [HttpPost("ForgotPassword")]
+        public async Task<IActionResult> ForgotPassword(ForgotPasswordParameters parameters)
+        {
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState.Values.SelectMany(state => state.Errors)
+                    .Select(error => error.ErrorMessage)
+                    .FirstOrDefault());
 
-            //var email = this.L(
-            //    "PasswordResetEmailBody",
-            //    _configuration.GetSection("App:ClientRootAddress").Value.TrimEnd('/'),
-            //    user.TenantId,
-            //    user.Id,
-            //    WebUtility.UrlEncode(passwordResetCode));
+            var user = await _userManager.FindByEmailAsync(parameters.Email);
+            if (user == null || !(await _userManager.IsEmailConfirmedAsync(user)))
+            {
+                _logger.LogInformation("Forgot Password with non-existent email / user: {0}", parameters.Email);
+                // Don't reveal that the user does not exist or is not confirmed
+                return Ok(new { success = "true" });
+            }
+                       
+            #region Forgot Password Email
+            try
+            {
+                // For more information on how to enable account confirmation and password reset please visit http://go.microsoft.com/fwlink/?LinkID=532713
+                var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+                string callbackUrl = string.Format("{0}/Account/ResetPassword/{1}?token={2}", _configuration["ApplicationUrl"], user.Id, token); //token must be a query string parameter as it is very long
+                
+                var email = new EmailMessage();
+                email.ToAddresses.Add(new EmailAddress(user.Email, user.Email));
+                email.FromAddresses.Add(new EmailAddress("support@blazorboilerplate.com", "support@blazorboilerplate.com"));
+                email = EmailTemplates.BuildForgotPasswordEmail(email, user.UserName, callbackUrl, token); //Replace First UserName with Name if you want to add name to Registration Form
 
-            //_emailSender.Send(
-            //    from: (await SettingManager.GetSettingValueAsync(EmailSettingNames.DefaultFromAddress)),
-            //        to: user.EmailAddress,
-            //        subject: this.L("PasswordResetEmailSubject"),
-            //        body: email,
-            //        isBodyHtml: true
-            //    );
+                _logger.LogInformation("Forgot Password Email Sent: {0}", user.Email);
+                await _emailService.SendEmailAsync(email);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInformation("Forgot Password email failed: {0}", ex.Message);
+            }
+            #endregion
+            return Ok(new { success = "true" });
+        }
+
+
+        [AllowAnonymous]
+        [ValidateAntiForgeryToken]
+        [HttpPost("ResetPassword")]
+        public async Task<IActionResult> ResetPassword(ResetPasswordParameters parameters)
+        {
+            if (!ModelState.IsValid)
+                return BadRequest(ModelState.Values.SelectMany(state => state.Errors)
+                    .Select(error => error.ErrorMessage)
+                    .FirstOrDefault());
+
+            var user = await _userManager.FindByIdAsync(parameters.UserId);
+            if (user == null)
+            {
+                _logger.LogInformation("User does not exist: {0}", parameters.UserId);
+                return BadRequest("User does not exist");
+            }
+
+            #region Reset Password Successful Email
+            try
+            {
+                IdentityResult result = await _userManager.ResetPasswordAsync(user, parameters.Token, parameters.Password);
+                if (result.Succeeded)
+                {
+                    #region Email Successful Password change
+                    var email = new EmailMessage();
+                    email.ToAddresses.Add(new EmailAddress(user.Email, user.Email));
+                    email.FromAddresses.Add(new EmailAddress("support@blazorboilerplate.com", "support@blazorboilerplate.com"));
+                    email = EmailTemplates.BuildPasswordResetEmail(email, user.UserName); //Replace First UserName with Name if you want to add name to Registration Form
+
+                    _logger.LogInformation("Reset Password Successful Email Sent: {0}", user.Email);
+                    await _emailService.SendEmailAsync(email);
+                    #endregion
+
+                    return Ok(new { success = "true" });
+                }
+                else
+                {
+                    _logger.LogInformation("Error while resetting the password!: {0}", user.UserName);
+                    return BadRequest(string.Format("Error while resetting the password!: {0}", user.UserName));                   
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInformation("Reset Password failed: {0}", ex.Message);
+                return BadRequest(string.Format("Error while resetting the password!: {0}", ex.Message));
+            }
+            #endregion
         }
 
         [Authorize]
-        [HttpPost("logout")]
+        [HttpPost("Logout")]
         public async Task<IActionResult> Logout()
         {
             _logger.LogInformation("User Logged out");
@@ -178,20 +311,25 @@ namespace BlazorBoilerplate.Server.Models
             return Ok();
         }
 
-        [Authorize]
-        [HttpGet("userinfo")]
-        public async Task<UserInfo> UserInfo()
+        //[Authorize]
+        [HttpGet("UserInfo")]
+        [ProducesResponseType(200)]
+        [ProducesResponseType(401)]
+        public UserInfo UserInfo()
         {
-            var user = await _userManager.GetUserAsync(HttpContext.User);
-            return BuildUserInfo(user);
+            return BuildUserInfo();
         }
 
-        private UserInfo BuildUserInfo(ApplicationUser user)
+        private UserInfo BuildUserInfo()
         {
             return new UserInfo
             {
-                Username        = user.UserName,
-                IsAuthenticated = true
+                IsAuthenticated = User.Identity.IsAuthenticated,
+                Username = User.Identity.Name,
+                ExposedClaims = User.Claims
+                        //Optionally: filter the claims you want to expose to the client
+                        //.Where(c => c.Type == "test-claim")
+                        .ToDictionary(c => c.Type, c => c.Value)
             };
         }
     }

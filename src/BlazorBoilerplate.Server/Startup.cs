@@ -18,6 +18,7 @@ using BlazorBoilerplate.Server.Services;
 using BlazorBoilerplate.Server.Authorization;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using System.Net;
+using BlazorBoilerplate.Server.Helpers;
 
 namespace BlazorBoilerplate.Server
 {
@@ -70,9 +71,12 @@ namespace BlazorBoilerplate.Server
                 options.Lockout.MaxFailedAccessAttempts = 10;
                 options.Lockout.AllowedForNewUsers = true;
 
-                // User settings
-                options.User.RequireUniqueEmail = false;
-                //options.SignIn.RequireConfirmedEmail = true;
+                // Require Confirmed Email User settings
+                if (Convert.ToBoolean(Configuration["RequireConfirmedEmail"]))
+                {
+                    options.User.RequireUniqueEmail = false;
+                    options.SignIn.RequireConfirmedEmail = true;
+                }
             });
 
             services.ConfigureApplicationCookie(options =>
@@ -127,6 +131,7 @@ namespace BlazorBoilerplate.Server
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
+            EmailTemplates.Initialize(env);
             using (var serviceScope = app.ApplicationServices.GetRequiredService<IServiceScopeFactory>().CreateScope())
             {
                 serviceScope.ServiceProvider.GetService<ApplicationDbContext>().Database.Migrate();
